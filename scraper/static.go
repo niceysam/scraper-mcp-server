@@ -2,7 +2,9 @@ package scraper
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gocolly/colly/v2"
@@ -106,6 +108,104 @@ func ScrapeMultiple(urls []string, selector, attribute string) (map[string][]str
 			}
 		}
 	}
+
+	return results, nil
+}
+
+// ScrapeMultiDepth crawls from a starting URL up to `depth` levels deep and
+// extracts CSS-selector matches from every visited page.
+// Returns a map of page URL → extracted values.
+func ScrapeMultiDepth(startURL, selector, attribute string, depth, maxPages int, sameDomainOnly bool, timeoutSeconds int) (map[string][]string, error) {
+	if attribute == "" {
+		attribute = "text"
+	}
+
+	parsedStart, err := url.Parse(startURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid start URL %q: %w", startURL, err)
+	}
+	startHost := parsedStart.Hostname()
+
+	results := make(map[string][]string)
+	var mu sync.Mutex
+
+	c := colly.NewCollector(
+		colly.UserAgent(userAgent),
+		colly.Async(true),
+		colly.MaxDepth(depth),
+	)
+	c.SetRequestTimeout(time.Duration(timeoutSeconds) * time.Second)
+	if err := c.Limit(&colly.LimitRule{
+		DomainGlob:  "*",
+		Parallelism: 5,
+	}); err != nil {
+		return nil, fmt.Errorf("failed to set parallelism: %w", err)
+	}
+
+	// Count pages visited so we can honour maxPages.
+	var pageCount int
+
+	c.OnHTML(selector, func(e *colly.HTMLElement) {
+		pageURL := e.Request.URL.String()
+		var val string
+		if attribute == "text" {
+			val = strings.TrimSpace(e.Text)
+		} else {
+			val = strings.TrimSpace(e.Attr(attribute))
+		}
+		if val == "" {
+			return
+		}
+		mu.Lock()
+		results[pageURL] = append(results[pageURL], val)
+		mu.Unlock()
+	})
+
+	// Follow links, respecting same-domain and maxPages limits.
+	c.OnHTML("a[href]", func(e *colly.HTMLElement) {
+		mu.Lock()
+		count := pageCount
+		mu.Unlock()
+		if count >= maxPages {
+			return
+		}
+
+		link := e.Request.AbsoluteURL(e.Attr("href"))
+		if link == "" {
+			return
+		}
+		if sameDomainOnly {
+			parsed, err := url.Parse(link)
+			if err != nil || parsed.Hostname() != startHost {
+				return
+			}
+		}
+		_ = e.Request.Visit(link)
+	})
+
+	c.OnRequest(func(r *colly.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		if pageCount >= maxPages {
+			r.Abort()
+			return
+		}
+		pageCount++
+	})
+
+	c.OnError(func(r *colly.Response, err error) {
+		pageURL := r.Request.URL.String()
+		mu.Lock()
+		if _, exists := results[pageURL]; !exists {
+			results[pageURL] = []string{"error: " + err.Error()}
+		}
+		mu.Unlock()
+	})
+
+	if err := c.Visit(startURL); err != nil {
+		return nil, fmt.Errorf("failed to visit %s: %w", startURL, err)
+	}
+	c.Wait()
 
 	return results, nil
 }

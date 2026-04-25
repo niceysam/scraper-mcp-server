@@ -1,32 +1,56 @@
 # scraper-mcp-server
 
-A Model Context Protocol (MCP) server that exposes web-scraping capabilities to any MCP-compatible AI client (Claude Desktop, OpenClaw mcporter, etc.).
+A lightweight MCP server for web scraping — handles both static HTML and JavaScript-rendered pages through a single, consistent interface.
 
-Three tools are provided:
+---
 
-| Tool | Engine | Use when |
+## Why I built this
+
+Most AI assistants can browse the web, but they often struggle with pages that require JavaScript to render content. When I tried to fetch data from sites like AWS blogs or dashboards, I kept getting back empty results — because the actual content only appears *after* JavaScript runs.
+
+I already had Python scripts using `requests` + `BeautifulSoup` for static pages, but JS-rendered pages meant spinning up Playwright separately, writing boilerplate every time, and context-switching between tools.
+
+So I built this MCP server to handle it all in one place. You tell it what URL and CSS selector you want — it figures out whether to use a lightweight HTTP fetch or headless Chrome, and gives you back the data.
+
+---
+
+## What it does
+
+Four tools, each for a different use case:
+
+| Tool | Engine | When to use |
 |---|---|---|
-| `scrape_static` | Colly (HTTP) | Page content is in the initial HTML response |
-| `scrape_js` | chromedp (headless Chrome) | Page requires JavaScript to render content |
-| `scrape_multiple` | Colly parallel | Same selector across many URLs at once |
+| `scrape_static` | Colly (HTTP) | Fast static HTML pages |
+| `scrape_js` | chromedp (headless Chrome) | JS-rendered SPAs, dashboards |
+| `scrape_multiple` | Colly parallel | Same selector across many URLs |
+| `scrape_crawl` | Colly recursive | Follow links to a given depth |
+
+All tools use the same interface: give a URL and a CSS selector, get back an array of matched values.
+
+---
+
+## Requirements
+
+- Go 1.21+
+- Chrome or Chromium installed on the host (only required for `scrape_js`)
 
 ---
 
 ## Installation
 
-**Prerequisites:** Go 1.21+ and (for `scrape_js`) Google Chrome or Chromium installed on the machine running the server.
-
 ```bash
 go install github.com/niceysam/scraper-mcp-server@latest
 ```
 
-The binary will be placed at `$(go env GOPATH)/bin/scraper-mcp-server`.
+Or download a pre-built binary from [Releases](https://github.com/niceysam/scraper-mcp-server/releases).
 
 ---
 
 ## MCP configuration
 
-### Claude Desktop (`~/Library/Application Support/Claude/claude_desktop_config.json`)
+### Claude Desktop
+
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
 
 ```json
 {
@@ -38,17 +62,15 @@ The binary will be placed at `$(go env GOPATH)/bin/scraper-mcp-server`.
 }
 ```
 
-### OpenClaw mcporter (`mcporter.json`)
+### OpenClaw mcporter
 
 ```json
 {
-  "servers": [
-    {
-      "name": "scraper",
-      "transport": "stdio",
-      "command": ["scraper-mcp-server"]
+  "mcpServers": {
+    "scraper": {
+      "command": "/path/to/scraper-mcp-server"
     }
-  ]
+  }
 }
 ```
 
@@ -58,111 +80,92 @@ The binary will be placed at `$(go env GOPATH)/bin/scraper-mcp-server`.
 
 ### `scrape_static`
 
-Fetches the raw HTML with Colly and returns values matched by a CSS selector.
-No JavaScript is executed — fast and lightweight.
+Fetches raw HTML via HTTP and extracts values using a CSS selector. No JavaScript execution — fast and lightweight.
 
 **Parameters**
 
-| Name | Type | Required | Description |
+| Name | Type | Default | Description |
 |---|---|---|---|
-| `url` | string | yes | URL to scrape |
-| `selector` | string | yes | CSS selector |
-| `attribute` | string | no | `"text"` (default) or any HTML attribute (`"href"`, `"src"`, `"data-id"`, …) |
+| `url` | string | required | Target URL |
+| `selector` | string | required | CSS selector |
+| `attribute` | string | `"text"` | `"text"` for inner text, or any attribute name (`"href"`, `"src"`, ...) |
 
-**Example — extract all link hrefs from a page**
+**Example**
 
 ```json
 {
-  "tool": "scrape_static",
-  "arguments": {
-    "url": "https://example.com",
-    "selector": "a",
-    "attribute": "href"
-  }
+  "url": "https://news.ycombinator.com",
+  "selector": ".titleline > a",
+  "attribute": "text"
 }
-```
-
-**Response**
-
-```json
-["https://www.iana.org/domains/reserved"]
 ```
 
 ---
 
 ### `scrape_js`
 
-Launches headless Chrome, navigates to the URL, optionally waits for an element, then extracts values.
-Use this for single-page apps or pages that load content via JavaScript.
+Launches headless Chrome, waits for JavaScript to execute, then extracts values. Use this for any page that loads content dynamically.
 
 **Parameters**
 
-| Name | Type | Required | Description |
+| Name | Type | Default | Description |
 |---|---|---|---|
-| `url` | string | yes | URL to scrape |
-| `selector` | string | yes | CSS selector |
-| `attribute` | string | no | `"text"` (default) or any HTML attribute |
-| `wait_for` | string | no | CSS selector to wait for before extracting (ensures dynamic content is loaded) |
-| `timeout_seconds` | number | no | Max wait time in seconds (default `30`) |
+| `url` | string | required | Target URL |
+| `selector` | string | required | CSS selector |
+| `attribute` | string | `"text"` | `"text"` or any attribute name |
+| `wait_for` | string | — | CSS selector to wait for before extracting |
+| `timeout_seconds` | number | `30` | Total timeout |
 
-**Example — scrape a React-rendered product list**
+**Example**
 
 ```json
 {
-  "tool": "scrape_js",
-  "arguments": {
-    "url": "https://example-spa.com/products",
-    "selector": ".product-title",
-    "wait_for": ".product-list",
-    "timeout_seconds": 15
-  }
+  "url": "https://aws.amazon.com/ko/blogs/tech/",
+  "selector": "article",
+  "timeout_seconds": 25
 }
-```
-
-**Response**
-
-```json
-["Widget A", "Widget B", "Widget C"]
 ```
 
 ---
 
 ### `scrape_multiple`
 
-Scrapes many URLs concurrently (up to 5 parallel workers) with the same selector.
-Returns a map of URL → matched values.
+Scrapes multiple URLs concurrently (5 parallel workers) with the same selector. Returns a map of URL → matched values.
 
 **Parameters**
 
-| Name | Type | Required | Description |
+| Name | Type | Default | Description |
 |---|---|---|---|
-| `urls` | string[] | yes | List of URLs to scrape |
-| `selector` | string | yes | CSS selector applied to every URL |
-| `attribute` | string | no | `"text"` (default) or any HTML attribute |
+| `urls` | string[] | required | List of URLs |
+| `selector` | string | required | CSS selector |
+| `attribute` | string | `"text"` | `"text"` or any attribute name |
 
-**Example — grab the `<h1>` from several pages**
+---
+
+### `scrape_crawl`
+
+Starts at a URL and recursively follows links to a specified depth, collecting matched values from every page visited.
+
+**Parameters**
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `url` | string | required | Starting URL |
+| `selector` | string | required | CSS selector |
+| `attribute` | string | `"text"` | `"text"` or any attribute name |
+| `depth` | number | `2` | How many link levels to follow |
+| `max_pages` | number | `20` | Maximum pages to visit |
+| `same_domain_only` | boolean | `true` | Restrict crawl to the same domain |
+| `timeout_seconds` | number | `60` | Total timeout |
+
+**Example** — crawl an AWS blog section two levels deep:
 
 ```json
 {
-  "tool": "scrape_multiple",
-  "arguments": {
-    "urls": [
-      "https://example.com",
-      "https://example.org",
-      "https://example.net"
-    ],
-    "selector": "h1"
-  }
-}
-```
-
-**Response**
-
-```json
-{
-  "https://example.com": ["Example Domain"],
-  "https://example.org": ["Example Domain"],
-  "https://example.net": ["Example Domain"]
+  "url": "https://aws.amazon.com/ko/blogs/tech/",
+  "selector": "article p",
+  "depth": 2,
+  "max_pages": 15
 }
 ```
 
@@ -170,7 +173,13 @@ Returns a map of URL → matched values.
 
 ## Notes
 
-- All requests are sent with `User-Agent: Mozilla/5.0 (compatible; scraper-mcp-server/1.0)`.
-- `scrape_static` and `scrape_multiple` use a 30-second HTTP timeout per request.
-- `scrape_js` requires Chrome/Chromium to be installed on the host.
-- Empty or whitespace-only matches are silently dropped from results.
+- All requests send `User-Agent: Mozilla/5.0 (compatible; scraper-mcp-server/1.0)`
+- `scrape_js` requires Chrome or Chromium to be available on the host
+- Empty and whitespace-only matches are dropped from results
+- For RSS feeds, use a dedicated RSS parser instead — this tool is for HTML pages
+
+---
+
+## License
+
+MIT

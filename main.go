@@ -21,6 +21,7 @@ func main() {
 	s.AddTool(scrapeStaticTool(), scrapeStaticHandler)
 	s.AddTool(scrapeJSTool(), scrapeJSHandler)
 	s.AddTool(scrapeMultipleTool(), scrapeMultipleHandler)
+	s.AddTool(scrapeCrawlTool(), scrapeCrawlHandler)
 
 	if err := server.ServeStdio(s); err != nil {
 		log.Fatalf("server error: %v", err)
@@ -148,6 +149,61 @@ func scrapeMultipleHandler(_ context.Context, req mcp.CallToolRequest) (*mcp.Cal
 	results, err := scraper.ScrapeMultiple(rawURLs, selector, attribute)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("scrape_multiple failed: %v", err)), nil
+	}
+
+	return jsonResult(results)
+}
+
+// ── scrape_crawl ─────────────────────────────────────────────────────────────
+
+func scrapeCrawlTool() mcp.Tool {
+	return mcp.NewTool(
+		"scrape_crawl",
+		mcp.WithDescription("Crawl a website starting from a URL, following links up to a configurable depth, and extract CSS-selector matches from every visited page. Returns a map of URL → matched values."),
+		mcp.WithString("url",
+			mcp.Required(),
+			mcp.Description("Starting URL for the crawl."),
+		),
+		mcp.WithString("selector",
+			mcp.Required(),
+			mcp.Description("CSS selector to extract content on each visited page."),
+		),
+		mcp.WithString("attribute",
+			mcp.Description(`Attribute to extract. Use "text" (default) for inner text, or any HTML attribute name such as "href", "src".`),
+		),
+		mcp.WithNumber("depth",
+			mcp.Description("How many link-levels deep to follow (1 = starting page only, 2 = starting page + linked pages, …). Default 2."),
+		),
+		mcp.WithNumber("max_pages",
+			mcp.Description("Maximum number of pages to visit across all depths. Default 20."),
+		),
+		mcp.WithBoolean("same_domain_only",
+			mcp.Description("Only follow links whose hostname matches the starting URL. Default true."),
+		),
+		mcp.WithNumber("timeout_seconds",
+			mcp.Description("Total timeout in seconds for the entire crawl. Default 60."),
+		),
+	)
+}
+
+func scrapeCrawlHandler(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	url, err := req.RequireString("url")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	selector, err := req.RequireString("selector")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	attribute := req.GetString("attribute", "text")
+	depth := int(req.GetFloat("depth", 2))
+	maxPages := int(req.GetFloat("max_pages", 20))
+	sameDomainOnly := req.GetBool("same_domain_only", true)
+	timeoutSeconds := int(req.GetFloat("timeout_seconds", 60))
+
+	results, err := scraper.ScrapeMultiDepth(url, selector, attribute, depth, maxPages, sameDomainOnly, timeoutSeconds)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("scrape_crawl failed: %v", err)), nil
 	}
 
 	return jsonResult(results)
